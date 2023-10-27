@@ -13,9 +13,9 @@ class SelfAttention(nn.Module):
 
         assert (self.heads_dim * heads == embed_size), "Emmbedings size needs to be div by heads"
 
-        self.values = nn.Linear(self.head_dim, self.heads_dim, bias=False)
-        self.keys = nn.Linear(self.head_dim, self.heads_dim, bias=False)
-        self.queries = nn.Linear(self.head_dim, self.heads_dim, bias=False)
+        self.values = nn.Linear(self.heads_dim, self.heads_dim, bias=False)
+        self.keys = nn.Linear(self.heads_dim, self.heads_dim, bias=False)
+        self.queries = nn.Linear(self.heads_dim, self.heads_dim, bias=False)
         self.fc_out = nn.Linear(heads * self.heads_dim, embed_size)
 
     def forward(self, values, keys, query, mask):
@@ -27,7 +27,11 @@ class SelfAttention(nn.Module):
         keys = keys.reshape(N, key_len, self.heads, self.heads_dim)
         queries = query.reshape(N, query_len, self.heads, self.heads_dim)
 
-        energy = torch.einsum("nqhd, nkhd->nhgk", [queries, keys])
+        values = self.values(values)
+        keys = self.keys(keys)
+        queries = self.queries(queries)
+
+        energy = torch.einsum("nqhd, nkhd->nhqk", [queries, keys])
 
         if mask is not None:
             energy = energy.masked_fill(mask == 0, float("-1e18"))
@@ -57,7 +61,7 @@ class TransformerBlock(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def forward(self, value, key, query, mask):
-        attention = self.attention(value, key, query)
+        attention = self.attention(value, key, query, mask)
 
         x = self.dropout(self.norm1(attention + query))
         forward = self.feed_forward(x)
@@ -81,7 +85,7 @@ class Encoder(nn.Module):
         self.embed_size = embed_size
         self.device = device
         self.word_emmbeding = nn.Embedding(src_vocab_size, embed_size)
-        self.positional_emmbeding = nn.Embedding(max_length, embed_size)
+        self.position_emmbeding = nn.Embedding(max_length, embed_size)
 
         self.layers = nn.ModuleList(
             [
@@ -91,15 +95,16 @@ class Encoder(nn.Module):
                     dropout=dropout,
                     forward_expansion=forward_expansion,
                 )
+                for _ in range(num_layers)
             ]
         )
-        self.dropout = dropout
+        self.dropout = nn.Dropout(dropout)
 
     def forward(self, x, mask):
         N, seq_length = x.shape
         positions = torch.arange(0, seq_length).expand(N, seq_length).to(self.device)
 
-        out = self.dropout(self.word_emmbeding(x) + self.positional_emmbeding(positions))
+        out = self.dropout(self.word_emmbeding(x) + self.position_emmbeding(positions))
 
         for layer in self.layers:
             out = layer(out, out, out, mask)
@@ -108,7 +113,7 @@ class Encoder(nn.Module):
 
 
 class DecoderBlock(nn.Module):
-    def __int__(self, embed_size, heads, forward_expansion, dropout, device):
+    def __init__(self, embed_size, heads, forward_expansion, dropout, device):
         super(DecoderBlock, self).__init__()
         self.attention = SelfAttention(embed_size, heads)
         self.norm = nn.LayerNorm(embed_size)
@@ -125,7 +130,7 @@ class DecoderBlock(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __int__(
+    def __init__(
             self,
             trg_vocab_size,
             embed_size,
@@ -155,10 +160,10 @@ class Decoder(nn.Module):
         x = self.dropout((self.word_emmbeding(x) + self.position_emmbeding(positions)))
 
         for layer in self.layers:
-            x = layer(x, enc_out, src_mask, trg_mask)
+            x = layer(x, enc_out, enc_out, src_mask, trg_mask)
 
         out = self.fc_out(x)
-
+        return out
 
 class Transformer(nn.Module):
     def __init__(
@@ -172,7 +177,7 @@ class Transformer(nn.Module):
             forward_expansion=4,
             heads=8,
             dropout=0,
-            device="cuda",
+            device="cpu",
             max_length=100
     ):
         super(Transformer, self).__init__()
@@ -203,7 +208,7 @@ class Transformer(nn.Module):
         self.device = device
 
     def make_src_mask(self, src):
-        src_mask = (src != self.src_pad_idx).unsqueeze(1).unsqueez(2)
+        src_mask = (src != self.src_pad_idx).unsqueeze(1).unsqueeze(2)
         return src_mask.to(self.device)
 
     def make_trg_mask(self, trg):
